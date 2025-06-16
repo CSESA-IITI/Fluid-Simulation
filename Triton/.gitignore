@@ -1,0 +1,11 @@
+bin-int
+compile_commands 
+FluidSim.make
+compile_commands.json
+Makefile
+.cache
+*.vcxproj.*
+*.vcxproj
+*.sln
+.vs
+Models

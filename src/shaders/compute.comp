@@ -1,0 +1,178 @@
+#version 450
+
+layout(binding = 0) uniform UniformBufferObject {
+    ivec2 dims;
+    float dt;
+} ubo;
+
+layout (binding = 1, rgba32f) uniform readonly image2D prevFrame;
+layout (binding = 2, rgba32f) uniform image2D currFrame;
+layout (binding = 3, rgba32f) uniform image2D tempTex;
+
+layout (local_size_x = 32, local_size_y = 32) in;
+
+ivec2 dims = ubo.dims;
+
+const int numOfVelIterations = 50;
+const int numOfPressureIterations = 40;
+const float rho = 10;
+const float mu = 0.1;
+
+ivec2 clampCoord(ivec2 coord) {
+    return clamp(coord, ivec2(0), dims - ivec2(1));
+}
+
+vec4 bilInterp(vec2 uv)
+{   vec2 blend = fract(uv);
+
+    vec4 col_11 = imageLoad(prevFrame,(ivec2(floor(uv))));
+    vec4 col_21 = imageLoad(prevFrame,(ivec2(ceil(uv.x),floor(uv.y))));
+    vec4 col_12 = imageLoad(prevFrame,(ivec2(floor(uv.x),ceil(uv.y))));
+    vec4 col_22 = imageLoad(prevFrame,(ivec2(ceil(uv.x), ceil(uv.y))));
+    
+    vec4 col_x = mix(col_11, col_21, blend.x);
+    vec4 col_y = mix(col_12, col_22, blend.x);
+    vec4 col = mix(col_x, col_y, blend.y);
+
+    return col;
+}
+void advect(vec2 coords){
+    vec4 currValue = imageLoad(prevFrame,ivec2(gl_GlobalInvocationID.xy));
+
+    vec2 pos = coords - ubo.dt * currValue.xy / rho;
+    memoryBarrier();
+    imageStore(currFrame,ivec2(gl_GlobalInvocationID.xy),vec4((bilInterp(pos)).xy,currValue.zw));
+    memoryBarrier();
+}
+
+float advectQuantity(vec2 coords){
+    vec2 pos = coords - ubo.dt * imageLoad(currFrame, ivec2(gl_GlobalInvocationID.xy)).xy / rho;
+
+    return bilInterp(pos).w;
+}
+
+float divergence(vec2 coords)
+{
+    vec2 vL = imageLoad(prevFrame,ivec2(gl_GlobalInvocationID.xy) + ivec2(-1,0)).xy;
+    vec2 vR = imageLoad(prevFrame,ivec2(gl_GlobalInvocationID.xy) + ivec2(1,0)).xy;
+    vec2 vB = imageLoad(prevFrame,ivec2(gl_GlobalInvocationID.xy) + ivec2(0,-1)).xy;
+    vec2 vT = imageLoad(prevFrame,ivec2(gl_GlobalInvocationID.xy) + ivec2(0,1)).xy;
+    return 0.5f * ((vR.x - vL.x) + (vT.y - vB.y));
+}
+
+void jacobiVelocity(vec2 coords)
+{
+    vec4 currValue = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy));
+  // left, right, bottom, and top x samples
+    vec2 vL = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy) + ivec2(-1,0)).xy;
+    vec2 vR = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy) + ivec2(1,0)).xy;
+    vec2 vB = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy) + ivec2(0,-1)).xy;
+    vec2 vT = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy) + ivec2(0,1)).xy;
+    // b sample, from center
+    vec2 bC = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy)).xy;
+
+    float alpha = mu * ubo.dt;
+    float rBeta = 1/(4 *mu* ubo.dt + rho);
+
+    // evaluate Jacobi iteration
+    imageStore(tempTex,ivec2(gl_GlobalInvocationID.xy),vec4(((vL + vR + vB + vT )* alpha + rho * bC) * rBeta,currValue.zw));
+
+}
+
+void jacobiPressure(vec2 coords)
+{
+    vec4 currValue = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy));
+  // left, right, bottom, and top x samples
+  float pL = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy) + ivec2(-1,0)).z;
+  float pR = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy) + ivec2(1,0)).z;
+  float pB = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy) + ivec2(0,-1)).z;
+  float pT = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy) + ivec2(0,1)).z;
+  // b sample, from center
+  float bC = divergence(coords);
+  // evaluate Jacobi iteration
+  float alpha = - rho/ubo.dt;
+  float beta = 0.25;
+
+   imageStore(tempTex,ivec2(gl_GlobalInvocationID.xy),vec4(currValue.xy,beta * (pL + pR + pB + pT + alpha * bC),currValue.w));
+   
+}
+
+void forceApplication(vec2 coords, vec4 currValue){
+}
+
+void gradient(vec2 coords)
+{
+  float pL = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy) + ivec2(-1,0)).z;
+  float pR = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy) + ivec2(1,0)).z;
+  float pB = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy) + ivec2(0,-1)).z;
+  float pT = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy) + ivec2(0,1)).z;
+  vec4 uNew = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy));
+  uNew.xy -= 0.5f * ubo.dt * vec2(pR - pL, pT - pB)/rho;
+
+  imageStore(tempTex,ivec2(gl_GlobalInvocationID.xy),uNew);
+}
+
+vec4 boundary(vec2 coords,vec2 offset,vec4 scale)
+{
+    return scale * imageLoad(prevFrame, ivec2(coords + offset));
+}
+
+void copyBackVelocity(vec2 coords){
+    vec4 pixel = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy));
+    vec2 vel = imageLoad(tempTex,ivec2(gl_GlobalInvocationID.xy)).xy;
+    memoryBarrier();
+    imageStore(currFrame,ivec2(gl_GlobalInvocationID.xy),vec4(vel,pixel.zw));
+    memoryBarrier();
+}
+
+void copyBackPressure(vec2 coords){
+    vec4 pixel = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy));
+    float p = imageLoad(tempTex,ivec2(gl_GlobalInvocationID.xy)).z;
+    
+    imageStore(currFrame,ivec2(gl_GlobalInvocationID.xy),vec4(pixel.xy,p,pixel.w));
+}
+
+void main(){
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+
+
+    bool isBoundary = (int(gl_GlobalInvocationID.x) == 0) || (int(gl_GlobalInvocationID.x) == dims.x - 1) || (int(gl_GlobalInvocationID.y) == dims.y - 1) || (int(gl_GlobalInvocationID.y) == 0);
+    vec2 coords = vec2(gl_GlobalInvocationID.xy);
+    vec4 pixel = imageLoad(prevFrame,ivec2(gl_GlobalInvocationID.xy));
+
+    if(!isBoundary){
+        advect(coords);
+        //for(int i = 0; i < numOfVelIterations;i++){
+        //    jacobiVelocity(coords);
+        //    memoryBarrier();
+        //        barrier();
+        //    copyBackVelocity(coords);
+        //     memoryBarrier(); barrier();
+        //}  
+
+        //for(int i = 0; i < numOfPressureIterations;i++){            
+        //    jacobiPressure(coords);
+        //    copyBackPressure(coords);
+        //} 
+        //
+        //gradient(coords);
+        //copyBackVelocity(coords);
+    }
+    else{
+        bool OnPosX = int(gl_GlobalInvocationID.x) == dims.x - 1;
+        bool OnNegX = int(gl_GlobalInvocationID.x) == 0;
+        bool OnPosY = int(gl_GlobalInvocationID.y) == dims.y - 1;
+        bool OnNegY = int(gl_GlobalInvocationID.y) == 0;
+
+        vec2 offset = int(OnPosX) * vec2(-1,0) + int(OnPosY) * vec2(0,-1) + int(OnNegX) * vec2(1,0) + int(OnNegY) * vec2(0,1);
+        vec4 bv = boundary(coords,offset,vec4(-1.0f,-1.0f,1.0f,1.0f));
+
+        imageStore(currFrame,ivec2(gl_GlobalInvocationID.xy),bv);
+    }
+
+    pixel = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy));
+    pixel.w = divergence(coords);
+    imageStore(currFrame,ivec2(gl_GlobalInvocationID.xy),pixel);
+
+    
+}

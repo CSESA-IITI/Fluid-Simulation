@@ -1,0 +1,40 @@
+#version 450
+
+layout(binding = 0) uniform UniformBufferObject {
+    vec4 pointAndPower;
+    ivec2 dims;
+    float rho;
+    float mu;
+    float dt;
+} ubo;
+
+layout (binding = 1, rgba32f) uniform readonly image2D prevFrame;
+layout (binding = 2, rgba32f) uniform readonly image2D currFrame;
+layout (binding = 3, rgba32f) uniform writeonly image2D tempTex;
+
+layout (local_size_x = 32, local_size_y = 32) in;
+
+ivec2 dims = ubo.dims;
+float rho = ubo.rho;
+float mu = ubo.mu;
+
+void main(){
+    bool isBoundary = (int(gl_GlobalInvocationID.x) == 0) || (int(gl_GlobalInvocationID.x) >= dims.x - 1) || 
+                        (int(gl_GlobalInvocationID.y) >= dims.y - 1) || (int(gl_GlobalInvocationID.y) == 0);
+    if(isBoundary) return;
+
+    vec4 currValue = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy));
+  // left, right, bottom, and top x samples
+    vec2 vL = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy) + ivec2(-1,0)).xy;
+    vec2 vR = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy) + ivec2(1,0)).xy;
+    vec2 vB = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy) + ivec2(0,-1)).xy;
+    vec2 vT = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy) + ivec2(0,1)).xy;
+    // b sample, from center
+    vec2 bC = imageLoad(currFrame,ivec2(gl_GlobalInvocationID.xy)).xy;
+
+    float alpha = mu * ubo.dt;
+    float rBeta = 1/(4 *mu* ubo.dt + rho);
+    currValue.xy = ((vL + vR + vB + vT )* alpha + rho * bC) * rBeta;
+    // evaluate Jacobi iteration
+    imageStore(tempTex,ivec2(gl_GlobalInvocationID.xy),currValue);
+}

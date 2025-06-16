@@ -1,0 +1,58 @@
+#version 450
+
+layout(binding = 0) uniform UniformBufferObject {
+    vec4 pointAndPower;
+    ivec2 dims;
+    float rho;
+    float mu;
+    float dt;
+} ubo;
+
+layout (binding = 1, rgba32f) uniform readonly image2D prevFrame;
+layout (binding = 2, rgba32f) uniform writeonly image2D currFrame;
+layout (binding = 3, rgba32f) uniform writeonly image2D tempTex;
+
+layout (local_size_x = 32, local_size_y = 32) in;
+
+ivec2 dims = ubo.dims;
+float rho = ubo.rho;
+float mu = ubo.mu;
+vec4 pointAndPower = ubo.pointAndPower;
+
+ivec2 clampCoord(ivec2 coord) {
+    return clamp(coord, ivec2(0), dims - ivec2(1));
+}
+
+vec4 bilInterp(vec2 uv)
+{   vec2 blend = fract(uv);
+
+    vec4 col_11 = imageLoad(prevFrame,clampCoord(ivec2(floor(uv))));
+    vec4 col_21 = imageLoad(prevFrame,clampCoord(ivec2(ceil(uv.x),floor(uv.y))));
+    vec4 col_12 = imageLoad(prevFrame,clampCoord(ivec2(floor(uv.x),ceil(uv.y))));
+    vec4 col_22 = imageLoad(prevFrame,clampCoord(ivec2(ceil(uv.x), ceil(uv.y))));
+    
+    vec4 col_x = mix(col_11, col_21, blend.x);
+    vec4 col_y = mix(col_12, col_22, blend.x);
+    vec4 col = mix(col_x, col_y, blend.y);
+
+    return col;
+}
+
+void main(){
+    bool isBoundary = (int(gl_GlobalInvocationID.x) == 0) || (int(gl_GlobalInvocationID.x) >= dims.x - 1) || 
+                        (int(gl_GlobalInvocationID.y) >= dims.y - 1) || (int(gl_GlobalInvocationID.y) == 0);
+    if(!isBoundary){
+        float radius = 300.0f;
+        vec2 r = pointAndPower.xy - gl_GlobalInvocationID.xy;
+        vec2 force = pointAndPower.zw * exp(-dot(r,r)/radius) ;
+
+        vec4 currValue = imageLoad(prevFrame,ivec2(gl_GlobalInvocationID.xy)) ;
+
+        vec2 pos = vec2(gl_GlobalInvocationID.xy) - ubo.dt * currValue.xy / rho;
+        vec4 inter = (bilInterp(pos)) + vec4(force * ubo.dt ,0.0f, exp(-dot(r,r)/radius));   
+        inter.w = inter.w * pow(0.5f,ubo.dt);
+        imageStore(tempTex,ivec2(gl_GlobalInvocationID.xy),inter);
+
+
+    }    
+}
